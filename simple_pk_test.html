@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple PK Room Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .section { border: 1px solid #ccc; padding: 15px; margin: 10px 0; }
+        .hidden { display: none; }
+        button { padding: 8px 15px; margin: 5px; }
+        input, textarea { padding: 5px; margin: 5px; }
+        .room-item { border: 1px solid #ddd; padding: 10px; margin: 5px 0; background: #f9f9f9; }
+        .host { background: #e7f3ff; }
+        .participant { background: #f0f8e7; }
+        .log { background: #f5f5f5; padding: 10px; height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <h1>Simple PK Room Test</h1>
+
+    <!-- Login Section -->
+    <div id="loginSection" class="section">
+        <h3>Login</h3>
+        <input type="text" id="tokenInput" placeholder="Paste JWT token here" style="width: 400px;">
+        <br>
+        <input type="text" id="baseUrlInput" value="http://localhost:8080" placeholder="Base URL">
+        <br>
+        <button onclick="login()">Login</button>
+        <div id="loginStatus"></div>
+    </div>
+
+    <!-- Main App Section -->
+    <div id="mainSection" class="section hidden">
+        <h3>Room Management</h3>
+        <div id="userInfo"></div>
+        
+        <!-- Current Room Status -->
+        <div class="section">
+            <h4>Current Room Status</h4>
+            <div id="currentRoomStatus">No active room</div>
+            <button onclick="refreshCurrentRoom()">Refresh</button>
+            <button onclick="leaveCurrentRoom()" id="leaveBtn" class="hidden">Leave Room</button>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="section">
+            <h4>Quick Actions</h4>
+            <button onclick="createRoom()">Create New Room</button>
+            <button onclick="refreshPublicRooms()">Refresh Public Rooms (REST API)</button>
+            <button onclick="getPublicRoomsViaWS()">Get Public Rooms (WebSocket)</button>
+        </div>
+
+        <!-- Public Rooms -->
+        <div class="section">
+            <h4>Public Rooms (Real-time via WebSocket)</h4>
+            <div id="publicRooms">Loading...</div>
+        </div>
+
+        <!-- WebSocket Section -->
+        <div class="section">
+            <h4>WebSocket Connection</h4>
+            <div id="wsStatus">Disconnected</div>
+            <button onclick="connectWebSocket()" id="wsConnectBtn">Connect WebSocket</button>
+            <button onclick="disconnectWebSocket()" id="wsDisconnectBtn" class="hidden">Disconnect</button>
+            <br><br>
+            <button onclick="toggleReady()" id="readyBtn" class="hidden">Toggle Ready</button>
+            <button onclick="startGame()" id="startBtn" class="hidden">Start Game</button>
+        </div>
+
+        <!-- Activity Log -->
+        <div class="section">
+            <h4>Activity Log</h4>
+            <div id="activityLog" class="log"></div>
+            <button onclick="clearLog()">Clear Log</button>
+        </div>
+    </div>
+
+    <script>
+        let token = '';
+        let baseUrl = 'http://localhost:8080';
+        let currentUser = null;
+        let currentRoom = null;
+        let ws = null;
+        let generalWs = null; // WebSocket for general operations (join/leave)
+        let publicRoomsWs = null; // WebSocket for public room events
+        let isReady = false;
+        let autoRefreshInterval = null;
+        let publicRooms = [];
+
+        // Login functionality
+        async function login() {
+            token = document.getElementById('tokenInput').value.trim();
+            baseUrl = document.getElementById('baseUrlInput').value.trim();
+            
+            if (!token) {
+                alert('Please enter JWT token');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${baseUrl}/api/v1/users/profile`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    currentUser = data.data;
+                    
+                    document.getElementById('loginStatus').innerHTML = `✅ Logged in as: ${currentUser.full_name || currentUser.email}`;
+                    document.getElementById('userInfo').innerHTML = `👤 User: ${currentUser.full_name || currentUser.email} (ID: ${currentUser.id})`;
+                    
+                    // Hide login, show main
+                    document.getElementById('loginSection').classList.add('hidden');
+                    document.getElementById('mainSection').classList.remove('hidden');
+                    
+                    // Connect general WebSocket for room operations
+                    connectGeneralWebSocket();
+                    
+                    // Connect public rooms WebSocket for real-time updates
+                    connectPublicRoomsWebSocket();
+                    
+                    // Start auto-refresh for current room only
+                    startAutoRefresh();
+                    
+                    // Initial load
+                    await refreshCurrentRoom();
+                    await refreshPublicRooms(); // One-time initial load
+                    
+                    log('✅ Login successful');
+                } else {
+                    const error = await response.json();
+                    document.getElementById('loginStatus').innerHTML = `❌ Login failed: ${error.error}`;
+                }
+            } catch (error) {
+                document.getElementById('loginStatus').innerHTML = `❌ Connection error: ${error.message}`;
+            }
+        }
+
+        // Auto-refresh functionality (only for current room now)
+        function startAutoRefresh() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            
+            autoRefreshInterval = setInterval(async () => {
+                await refreshCurrentRoom();
+                // Public rooms now update via WebSocket, no need to poll
+            }, 5000); // Every 5 seconds
+            
+            log('🔄 Auto-refresh started for current room (5s interval)');
+        }
+
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+                log('⏹️ Auto-refresh stopped');
+            }
+        }
+
+        // Room management
+        async function refreshCurrentRoom() {
+            try {
+                const response = await fetch(`${baseUrl}/api/v1/protected/pk/rooms/active`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    currentRoom = data.data;
+                    
+                    if (currentRoom) {
+                        const isHost = currentRoom.host_user_id === currentUser.id;
+                        const hostBadge = isHost ? ' 👑 (HOST)' : '';
+                        
+                        document.getElementById('currentRoomStatus').innerHTML = `
+                            <div class="${isHost ? 'host' : 'participant'}">
+                                <strong>${currentRoom.room_name}</strong> - Code: <strong>${currentRoom.room_code}</strong>${hostBadge}<br>
+                                Status: ${currentRoom.room_status} | Players: ${currentRoom.current_players}/${currentRoom.max_players}<br>
+                                Participants: ${currentRoom.participants.map(p => 
+                                    `${p.user.full_name || p.user.email}${p.is_host ? ' 👑' : ''}${p.is_ready ? ' ✅' : ' ❌'}`
+                                ).join(', ')}
+                            </div>
+                        `;
+                        
+                        document.getElementById('leaveBtn').classList.remove('hidden');
+                        
+                        // Show WebSocket controls if in room
+                        document.getElementById('wsConnectBtn').classList.remove('hidden');
+                        document.getElementById('readyBtn').classList.remove('hidden');
+                        if (isHost) {
+                            document.getElementById('startBtn').classList.remove('hidden');
+                        }
+                        
+                        // Auto-connect to room WebSocket if not already connected
+                        if (!ws || ws.readyState !== WebSocket.OPEN) {
+                            setTimeout(connectWebSocket, 500);
+                        }
+                        
+                    } else {
+                        document.getElementById('currentRoomStatus').innerHTML = 'No active room';
+                        document.getElementById('leaveBtn').classList.add('hidden');
+                        document.getElementById('readyBtn').classList.add('hidden');
+                        document.getElementById('startBtn').classList.add('hidden');
+                        currentRoom = null;
+                    }
+                } else if (response.status === 404) {
+                    document.getElementById('currentRoomStatus').innerHTML = 'No active room';
+                    document.getElementById('leaveBtn').classList.add('hidden');
+                    currentRoom = null;
+                }
+            } catch (error) {
+                log(`❌ Error refreshing current room: ${error.message}`);
+            }
+        }
+
+        async function createRoom() {
+            try {
+                const roomData = {
+                    room_name: `Room by ${currentUser.full_name || currentUser.email}`,
+                    category_id: 1,
+                    lesson_id: 1,
+                    max_players: 4,
+                    game_mode: "dictation",
+                    time_limit_seconds: 300,
+                    is_public: true,
+                    password: ""
+                };
+
+                const response = await fetch(`${baseUrl}/api/v1/protected/pk/rooms`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(roomData)
+                });
+
+                const result = await response.json();
+                if (response.ok) {
+                    log(`✅ Room created: ${result.data.room_name} (${result.data.room_code})`);
+                    await refreshCurrentRoom();
+                } else {
+                    log(`❌ Failed to create room: ${result.error}`);
+                }
+            } catch (error) {
+                log(`❌ Error creating room: ${error.message}`);
+            }
+        }
+
+        function leaveCurrentRoom() {
+            if (!currentRoom) return;
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Use room WebSocket if connected
+                ws.send(JSON.stringify({
+                    type: 'leave_room',
+                    data: { room_id: currentRoom.id }
+                }));
+                log(`🔄 Leaving room: ${currentRoom.room_name}...`);
+            } else {
+                log('❌ Room WebSocket not connected');
+            }
+        }
+
+        function joinRoom(roomCode) {
+            if (!generalWs || generalWs.readyState !== WebSocket.OPEN) {
+                log('❌ General WebSocket not connected');
+                return;
+            }
+
+            generalWs.send(JSON.stringify({
+                type: 'join_room',
+                data: { 
+                    room_code: roomCode,
+                    password: ''
+                }
+            }));
+            log(`🔄 Joining room: ${roomCode}...`);
+        }
+
+        async function refreshPublicRooms() {
+            try {
+                const response = await fetch(`${baseUrl}/api/v1/pk/rooms/public`);
+                const result = await response.json();
+
+                if (response.ok && result.data && result.data.rooms) {
+                    publicRooms = result.data.rooms;
+                    renderPublicRooms();
+                    log(`📋 Manual refresh: Loaded ${publicRooms.length} public rooms`);
+                } else {
+                    publicRooms = [];
+                    renderPublicRooms();
+                }
+            } catch (error) {
+                log(`❌ Error refreshing public rooms: ${error.message}`);
+                document.getElementById('publicRooms').innerHTML = 'Error loading rooms';
+            }
+        }
+
+        function renderPublicRooms() {
+            if (publicRooms.length === 0) {
+                document.getElementById('publicRooms').innerHTML = 'No public rooms available';
+                return;
+            }
+
+            const roomsHtml = publicRooms.map(room => {
+                const canJoin = !currentRoom && room.room_status === 'waiting';
+                const hostName = room.host_user ? (room.host_user.full_name || room.host_user.email) : 'Unknown';
+                return `
+                    <div class="room-item">
+                        <strong>${room.room_name}</strong> - Code: <strong>${room.room_code}</strong><br>
+                        Host: ${hostName}<br>
+                        Players: ${room.current_players}/${room.max_players} | Status: ${room.room_status}<br>
+                        ${canJoin ? `<button onclick="joinRoom('${room.room_code}')">Join</button>` : ''}
+                    </div>
+                `;
+            }).join('');
+            
+            document.getElementById('publicRooms').innerHTML = roomsHtml;
+        }
+
+        function getPublicRoomsViaWS() {
+            if (!publicRoomsWs || publicRoomsWs.readyState !== WebSocket.OPEN) {
+                log('❌ Public Rooms WebSocket not connected');
+                return;
+            }
+
+            publicRoomsWs.send(JSON.stringify({
+                type: 'get_public_rooms',
+                data: {
+                    page: 1,
+                    limit: 50
+                }
+            }));
+            log('📡 Requesting public rooms via WebSocket...');
+        }
+
+        // Public Rooms WebSocket functionality (for real-time room updates)
+        function connectPublicRoomsWebSocket() {
+            if (publicRoomsWs) {
+                publicRoomsWs.close();
+            }
+
+            const wsUrl = baseUrl.replace('http', 'ws');
+            publicRoomsWs = new WebSocket(`${wsUrl}/api/v1/protected/pk/ws?token=${encodeURIComponent(token)}`);
+
+            publicRoomsWs.onopen = function() {
+                log('🔌 Public Rooms WebSocket connected');
+                // Subscribe to public room events
+                publicRoomsWs.send(JSON.stringify({
+                    type: 'subscribe_public_rooms',
+                    data: {}
+                }));
+                log('📡 Subscribed to public room events');
+            };
+
+            publicRoomsWs.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    log(`📥 Public Rooms WS: ${message.type}`);
+                    
+                    switch (message.type) {
+                        case 'public_rooms_subscription_response':
+                            if (message.data.success) {
+                                log(`✅ ${message.data.message}`);
+                            }
+                            break;
+                        
+                        case 'public_room_created':
+                            log(`🆕 New room created: ${message.data.room.room_name}`);
+                            publicRooms.unshift(message.data.room);
+                            renderPublicRooms();
+                            break;
+                        
+                        case 'public_room_updated':
+                            log(`🔄 Room updated: ${message.data.room.room_name}`);
+                            const updateIndex = publicRooms.findIndex(room => room.id === message.data.room.id);
+                            if (updateIndex !== -1) {
+                                publicRooms[updateIndex] = message.data.room;
+                            } else {
+                                publicRooms.push(message.data.room);
+                            }
+                            renderPublicRooms();
+                            break;
+                        
+                        case 'public_room_removed':
+                            log(`🗑️ Room removed: ${message.data.room_code}`);
+                            publicRooms = publicRooms.filter(room => room.id !== message.data.room_id);
+                            renderPublicRooms();
+                            break;
+                        
+                        case 'public_rooms_response':
+                            if (message.data.success) {
+                                publicRooms = message.data.rooms;
+                                renderPublicRooms();
+                                log(`📋 Loaded ${message.data.rooms.length} public rooms`);
+                            }
+                            break;
+                        
+                        default:
+                            log(`📥 Public Rooms WS: ${message.type} - ${JSON.stringify(message.data)}`);
+                    }
+                } catch (error) {
+                    log(`📥 Public Rooms WS Raw: ${event.data}`);
+                }
+            };
+
+            publicRoomsWs.onclose = function() {
+                log('❌ Public Rooms WebSocket disconnected');
+                // Try to reconnect after 3 seconds
+                setTimeout(connectPublicRoomsWebSocket, 3000);
+            };
+
+            publicRoomsWs.onerror = function(error) {
+                log(`🚨 Public Rooms WebSocket error: ${error}`);
+            };
+        }
+
+        // General WebSocket functionality (for join/leave operations)
+        function connectGeneralWebSocket() {
+            if (generalWs) {
+                generalWs.close();
+            }
+
+            const wsUrl = baseUrl.replace('http', 'ws');
+            generalWs = new WebSocket(`${wsUrl}/api/v1/protected/pk/ws?token=${encodeURIComponent(token)}`);
+
+            generalWs.onopen = function() {
+                log('🔌 General WebSocket connected');
+            };
+
+            generalWs.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    log(`📥 General WS: ${message.type} - ${JSON.stringify(message.data)}`);
+                    
+                    // Handle specific message types
+                    if (message.type === 'join_room_response') {
+                        if (message.data.success) {
+                            log(`✅ Joined room successfully: ${message.data.room.room_name}`);
+                            currentRoom = message.data.room;
+                            refreshCurrentRoom();
+                            // Auto-connect to room WebSocket
+                            setTimeout(connectWebSocket, 500);
+                        } else {
+                            log(`❌ Failed to join room: ${message.data.error}`);
+                        }
+                    } else if (message.type === 'active_room_response') {
+                        if (message.data.success && message.data.room) {
+                            currentRoom = message.data.room;
+                            refreshCurrentRoom();
+                        }
+                    }
+                } catch (error) {
+                    log(`📥 General WS Raw: ${event.data}`);
+                }
+            };
+
+            generalWs.onclose = function() {
+                log('❌ General WebSocket disconnected');
+                // Try to reconnect after 3 seconds
+                setTimeout(connectGeneralWebSocket, 3000);
+            };
+
+            generalWs.onerror = function(error) {
+                log(`🚨 General WebSocket error: ${error}`);
+            };
+        }
+
+        // Room WebSocket functionality
+        function connectWebSocket() {
+            if (!currentRoom) {
+                log('❌ No active room to connect WebSocket');
+                return;
+            }
+
+            if (ws) {
+                ws.close();
+            }
+
+            const wsUrl = baseUrl.replace('http', 'ws');
+            ws = new WebSocket(`${wsUrl}/api/v1/protected/pk/ws?room_id=${currentRoom.id}&token=${encodeURIComponent(token)}`);
+
+            ws.onopen = function() {
+                document.getElementById('wsStatus').innerHTML = '✅ Connected';
+                document.getElementById('wsConnectBtn').classList.add('hidden');
+                document.getElementById('wsDisconnectBtn').classList.remove('hidden');
+                log('🔌 Room WebSocket connected and authenticated');
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const message = JSON.parse(event.data);
+                    log(`📥 Room WS: ${message.type} - ${JSON.stringify(message.data)}`);
+                    
+                    // Handle specific message types
+                    if (message.type === 'room_update') {
+                        // Refresh room info when we get updates
+                        setTimeout(refreshCurrentRoom, 500);
+                    } else if (message.type === 'leave_room_response') {
+                        if (message.data.success) {
+                            log(`✅ ${message.data.message}`);
+                            // WebSocket will be closed by server, just reset local state
+                            currentRoom = null;
+                            refreshCurrentRoom();
+                        } else {
+                            log(`❌ Failed to leave room: ${message.data.error}`);
+                        }
+                    } else if (message.type === 'player_joined') {
+                        log(`👤 Player joined: ${message.data.participant.user.full_name || message.data.participant.user.email}`);
+                        refreshCurrentRoom();
+                    } else if (message.type === 'player_left') {
+                        log(`👋 Player left (ID: ${message.data.user_id})`);
+                        refreshCurrentRoom();
+                    } else if (message.type === 'room_deleted') {
+                        log(`🗑️ Room deleted: ${message.data.message}`);
+                        disconnectWebSocket();
+                        currentRoom = null;
+                        refreshCurrentRoom();
+                    }
+                } catch (error) {
+                    log(`📥 Room WS Raw: ${event.data}`);
+                }
+            };
+
+            ws.onclose = function() {
+                document.getElementById('wsStatus').innerHTML = '❌ Disconnected';
+                document.getElementById('wsConnectBtn').classList.remove('hidden');
+                document.getElementById('wsDisconnectBtn').classList.add('hidden');
+                log('❌ Room WebSocket disconnected');
+            };
+
+            ws.onerror = function(error) {
+                log(`🚨 Room WebSocket error: ${error}`);
+            };
+        }
+
+        function disconnectWebSocket() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function disconnectGeneralWebSocket() {
+            if (generalWs) {
+                generalWs.close();
+                generalWs = null;
+            }
+        }
+
+        function disconnectPublicRoomsWebSocket() {
+            if (publicRoomsWs) {
+                // Unsubscribe from public room events before closing
+                if (publicRoomsWs.readyState === WebSocket.OPEN) {
+                    publicRoomsWs.send(JSON.stringify({
+                        type: 'unsubscribe_public_rooms',
+                        data: {}
+                    }));
+                }
+                publicRoomsWs.close();
+                publicRoomsWs = null;
+                log('🔌 Public Rooms WebSocket disconnected');
+            }
+        }
+
+        function toggleReady() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('❌ WebSocket not connected');
+                return;
+            }
+
+            isReady = !isReady;
+            ws.send(JSON.stringify({
+                type: 'ready_status',
+                data: { is_ready: isReady }
+            }));
+            log(`🎯 Set ready status: ${isReady}`);
+        }
+
+        function startGame() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                log('❌ WebSocket not connected');
+                return;
+            }
+
+            ws.send(JSON.stringify({
+                type: 'start_game',
+                data: {}
+            }));
+            log('🎮 Starting game...');
+        }
+
+        // Utility functions
+        function log(message) {
+            const logDiv = document.getElementById('activityLog');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function clearLog() {
+            document.getElementById('activityLog').innerHTML = '';
+        }
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', function() {
+            stopAutoRefresh();
+            disconnectWebSocket();
+            disconnectGeneralWebSocket();
+            disconnectPublicRoomsWebSocket();
+        });
+    </script>
+</body>
+</html>

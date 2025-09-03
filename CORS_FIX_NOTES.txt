@@ -1,0 +1,68 @@
+CORS FIX NOTES - DICTATION LESSONS API
+=====================================
+
+PROBLEM:
+- Endpoint GET /lessons?category_id=1 bị lỗi CORS
+- Các endpoint khác hoạt động bình thường
+- Error: "Access to fetch at 'http://localhost:8080/api/v1/lessons?category_id=1' from origin 'http://localhost:5173' has been blocked by CORS policy"
+
+ROOT CAUSE ANALYSIS:
+1. Backend server có cấu hình CORS nhưng không nhất quán giữa các endpoints
+2. Endpoint /lessons?category_id= có thể chưa được cấu hình CORS đúng cách
+3. Server có thể không hỗ trợ query parameters với CORS cho endpoint này
+
+SOLUTION FOUND:
+- Thay vì sử dụng: GET /lessons?category_id=1
+- Sử dụng: GET /categories/1/lessons
+- Endpoint này hoạt động hoàn hảo với CORS đã được cấu hình đúng
+
+TECHNICAL DETAILS:
+==================
+
+FAILED ENDPOINT:
+- URL: http://localhost:8080/api/v1/lessons?category_id=1
+- Method: GET
+- Status: CORS Error
+- Headers: Access-Control-Allow-Origin missing
+
+WORKING ENDPOINT:
+- URL: http://localhost:8080/api/v1/categories/1/lessons  
+- Method: GET
+- Status: 200 OK
+- Headers: 
+  * access-control-allow-origin: http://localhost:5173
+  * access-control-allow-credentials: true
+  * content-type: application/json; charset=utf-8
+
+CODE CHANGES MADE:
+=================
+
+1. File: src/utils/api.ts
+   - Added function getLessonsByCategoryPath()
+   - Uses endpoint: /categories/${categoryId}/lessons
+   - Minimal headers: { 'Accept': 'application/json' }
+
+2. File: src/pages/DictationLessons.tsx
+   - Changed from api.getLessonsByCategory() 
+   - To: api.getLessonsByCategoryPath()
+   - Removed multiple fallback attempts
+
+LESSONS LEARNED:
+===============
+1. Backend CORS configuration might not be consistent across all endpoints
+2. RESTful endpoint structure (/categories/{id}/lessons) works better than query parameters
+3. Always test different endpoint patterns when facing CORS issues
+4. Path-based parameters are more reliable than query parameters for CORS
+
+FINAL WORKING CONFIGURATION:
+===========================
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8080
+- API Endpoint: GET /categories/{categoryId}/lessons
+- Headers: Accept: application/json
+- No proxy needed
+- No additional CORS configuration needed on frontend
+
+DATE: August 24, 2025
+FIXED BY: AI Assistant
+STATUS: ✅ RESOLVED

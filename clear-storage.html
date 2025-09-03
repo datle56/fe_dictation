@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Clear Local Storage</title>
+</head>
+<body>
+    <h1>Clearing Local Storage...</h1>
+    <p>This page will clear your localStorage and redirect you back to the app.</p>
+    <script>
+        // Clear localStorage
+        localStorage.clear();
+        console.log('LocalStorage cleared!');
+        
+        // Redirect back to the app
+        setTimeout(() => {
+            window.location.href = 'http://localhost:5173';
+        }, 1000);
+    </script>
+</body>
+</html> 
